@@ -19,7 +19,6 @@ import java.util.concurrent.CountDownLatch
  */
 fun main() {
   val service = Service(
-    address = 1997,
     name = "Echo",
     icon = linkedMapOf("symbol" to "speaker.wave.2", "text" to "E"),
   )
@@ -43,6 +42,6 @@ fun main() {
     )
     .start()
 
-  println("echo service started (hub-lite :1997)")
+  println("echo service started (hub ${System.getenv("HUB") ?: "127.0.0.1:1997"})")
   CountDownLatch(1).await()
 }

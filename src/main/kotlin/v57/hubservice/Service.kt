@@ -12,23 +12,31 @@ import kotlin.concurrent.thread
  * Registers API endpoints on a hub (hub-lite/hub-pro) and serves calls
  * forwarded by it; also lets this process call API through the hub.
  *
- * Lite port of hub-service (TS reference): no auth, no keychain, no crypto.
- * The wire contract matches the TS/Go reference — `hub/profile/update` and
- * `hub/service/update` are re-sent on every (re)connect (the hub drops
- * services on disconnect).
+ * Port of hub-service (TS reference) with hub-pro auth: on every (re)connect
+ * the client attaches fresh auth headers (`auth: <signed token>` + `v: 0`,
+ * TS parity) so the connection is keyed — owner keys get services ENABLED
+ * immediately, non-owner keys register as pending host approval. hub-lite
+ * ignores the headers entirely (regression-safe). The wire contract matches
+ * the TS/Go reference — `hub/profile/update` and `hub/service/update` are
+ * re-sent on every (re)connect (the hub drops services on disconnect).
  *
  * @param address a port (Int) or a ws:// URL (String); default 1997 or $HUB.
  * @param name    profile name shown in the hub.
  * @param icon    profile icon: a String or a Map like
  *                `linkedMapOf("symbol" to "speaker.wave.2", "text" to "E")`.
+ * @param sign    token factory for hub-pro auth (default: the keychain
+ *                `auth` file in the cwd, TS parity); a fresh token is signed
+ *                for every (re)connect.
  */
 class Service(
   address: Any? = null,
   val name: String? = null,
   val icon: Any? = null,
+  val sign: (() -> String)? = null,
 ) {
   private val channel = Channel<Any?>()
-  private val addressValue: Any = address ?: System.getenv("HUB") ?: 1997
+  private val addressValue: Any =
+    address ?: System.getenv("HUB")?.toIntOrNull() ?: System.getenv("HUB") ?: 1997
 
   internal val profile: Profile? = if (name != null || icon != null) Profile(name, icon) else null
 
@@ -179,9 +187,21 @@ class Service(
   }
 
   private fun connectClient(): Client<Any?> = when (val a = addressValue) {
-    is Int -> channel.connect(a, ConnectOptions())
-    is String -> channel.connect(a, ConnectOptions())
+    is Int -> channel.connect(a, ConnectOptions(headers = authHeaders()))
+    is String -> channel.connect(a, ConnectOptions(headers = authHeaders()))
     else -> throw IllegalArgumentException("address must be an Int port or a ws:// String URL")
+  }
+
+  /**
+   * Fresh hub-pro auth headers for every (re)connect: a freshly signed token
+   * + protocol version (TS reference parity). [connectClient] runs this on
+   * every dial (initial connect and every reconnect), so each connection
+   * carries its own token. The channel-kotlin client appends the raw header
+   * string to the ws:// upgrade request; hub-lite ignores it (regression-safe).
+   */
+  internal fun authHeaders(): String {
+    val token = sign?.invoke() ?: Keychain.sign()
+    return "auth: $token\r\nv: 0"
   }
 
   private fun sendUpdates() {

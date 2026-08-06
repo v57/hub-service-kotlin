@@ -3,3 +3,4 @@ build/
 .kotlin/
 *.class
 .DS_Store
+auth

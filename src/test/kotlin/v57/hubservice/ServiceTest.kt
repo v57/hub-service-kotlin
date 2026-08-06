@@ -108,4 +108,25 @@ class ServiceTest {
     assertTrue(json.contains(""""type":"fileOperation""""), json)
     assertTrue(json.contains(""""type":"spacer""""), json)
   }
+
+  @Test
+  fun authHeadersCarrySignedTokenAndVersion() {
+    val s = Service(sign = { "key.fake.sig.123" })
+    val headers = s.authHeaders()
+    assertTrue(headers.startsWith("auth: key.fake.sig.123\r\n"), headers)
+    assertTrue(headers.endsWith("v: 0"), headers)
+  }
+
+  @Test
+  fun authHeadersDefaultSignViaKeychain() {
+    // Real keychain token: key.<pub>.<sig>.<decimal-expiry>, fresh per call.
+    val s = Service()
+    val headers = s.authHeaders()
+    val token = headers.removePrefix("auth: ").substringBefore("\r\n")
+    val parts = token.split(".")
+    assertEquals(4, parts.size, "key.<pub>.<sig>.<expiry>")
+    assertEquals("key", parts[0])
+    assertTrue(parts[3].all { it.isDigit() }, "expiry is decimal: ${parts[3]}")
+    assertTrue(headers.endsWith("v: 0"), headers)
+  }
 }
