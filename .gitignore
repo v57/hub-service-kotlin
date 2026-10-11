@@ -4,3 +4,5 @@ build/
 *.class
 .DS_Store
 auth
+CLAUDE.md
+/.claude
