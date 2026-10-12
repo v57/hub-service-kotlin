@@ -17,12 +17,12 @@ build.
 
 `hub-service-kotlin` is a Gradle (Kotlin JVM) library. It expects
 `channel-kotlin` as a sibling checkout and wires it in with
-`includeBuild("../channel-kotlin")`:
+`includeBuild("../../Channel/channel-kotlin")`:
 
 ```kotlin
 // settings.gradle.kts
 rootProject.name = "my-service"
-includeBuild("../channel-kotlin")
+includeBuild("../../Channel/channel-kotlin")
 ```
 
 ```kotlin

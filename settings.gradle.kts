@@ -1,3 +1,3 @@
 rootProject.name = "hub-service-kotlin"
 
-includeBuild("../channel-kotlin")
+includeBuild("../../Channel/channel-kotlin")
