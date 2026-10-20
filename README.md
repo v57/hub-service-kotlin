@@ -104,8 +104,15 @@ val response = service.send("echo/upper", "hello") // "HELLO"
   `platform`, `parent` override the suggestions; `device = false` turns it off
 - `post(path, settings? = null) { body -> response }` — register a
   request/response endpoint; throw `ChannelException` to signal an error
+- `post(path, settings? = null) { body, request -> response }` — the handler
+  also gets the `Request`: `caller` (who is calling, from the hub's
+  `context.hub.caller`: `key`, `deviceId`, `deviceName`, `groups`, `owner`,
+  and `via`/`claimed` through a merged hub; null on hubs that don't send it),
+  `hubKey` and the whole `context`
 - `stream(path, settings? = null) { body, emit -> ... }` — register a
-  streaming endpoint; call `emit(value)` per yielded value
+  streaming endpoint; call `emit(value)` per yielded value (also
+  `{ body, request, emit -> }`)
+- `stop()` — stops the poll thread and closes the connection
 - `app(app: App)` — header goes to the hub apps list; the app path streams the
   AppInterface (`header`, `body`, `top`, `bottom`, `data` — all five keys)
 - `send(path, body?)` — client call through the hub

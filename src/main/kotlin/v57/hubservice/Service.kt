@@ -165,6 +165,10 @@ class Service(
 
   private val started = java.util.concurrent.atomic.AtomicBoolean(false)
 
+  @Volatile
+  private var stopped = false
+  private var pollThread: Thread? = null
+
   /**
    * Registers a request/response API endpoint. [handler] receives the decoded
    * request body and returns the response body (throw [ChannelException] to
@@ -177,6 +181,17 @@ class Service(
   }
 
   /**
+   * Registers a request/response API endpoint whose [handler] also receives
+   * the [Request]: the caller identity the hub forwards ([Request.caller])
+   * and the whole request context.
+   */
+  fun post(path: String, settings: ApiSettings? = null, handler: (Any?, Request) -> Any?): Service {
+    addPath(path, settings)
+    channel.post<Any?, Any?, Any?>(path) { req -> handler(req.body, Request.of(req.path, req.body, req.context)) }
+    return this
+  }
+
+  /**
    * Registers a streaming API endpoint. [handler] receives the decoded request
    * body and an emit function to stream values back to the caller.
    */
@@ -184,6 +199,18 @@ class Service(
     addPath(path, settings)
     channel.stream<Any?, Any?, Unit>(path) { req ->
       handler(req.body) { item -> req.emitter.emit(item) }
+    }
+    return this
+  }
+
+  /**
+   * Registers a streaming API endpoint whose [handler] also receives the
+   * [Request] with the caller identity.
+   */
+  fun stream(path: String, settings: ApiSettings? = null, handler: (Any?, Request, (Any?) -> Unit) -> Unit): Service {
+    addPath(path, settings)
+    channel.stream<Any?, Any?, Any?>(path) { req ->
+      handler(req.body, Request.of(req.path, req.body, req.context)) { item -> req.emitter.emit(item) }
     }
     return this
   }
@@ -255,12 +282,26 @@ class Service(
    */
   fun start(): Service {
     if (started.getAndSet(true)) return this
-    thread(name = "hub-service") { pollLoop() }
+    pollThread = thread(name = "hub-service") {
+      try {
+        pollLoop()
+      } catch (e: InterruptedException) {
+        // stop()
+      }
+    }
     return this
   }
 
+  /** Stops the poll thread and closes the connection. */
+  fun stop() {
+    stopped = true
+    pollThread?.interrupt()
+    client?.let { runCatching { it.stop() } }
+    client = null
+  }
+
   private fun pollLoop() {
-    while (!Thread.currentThread().isInterrupted) {
+    while (!stopped && !Thread.currentThread().isInterrupted) {
       var c = client
       if (c == null || !c.isConnected()) {
         if (c != null) {
