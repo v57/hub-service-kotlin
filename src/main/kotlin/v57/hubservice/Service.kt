@@ -13,32 +13,69 @@ import kotlin.concurrent.thread
  * forwarded by it; also lets this process call API through the hub.
  *
  * Port of hub-service (TS reference) with hub-pro auth: on every (re)connect
- * the client attaches fresh auth headers (`auth: <signed token>` + `v: 0`,
- * TS parity) so the connection is keyed — owner keys get services ENABLED
- * immediately, non-owner keys register as pending host approval. hub-lite
- * ignores the headers entirely (regression-safe). The wire contract matches
- * the TS/Go reference — `hub/profile/update` and `hub/service/update` are
- * re-sent on every (re)connect (the hub drops services on disconnect).
+ * the client attaches fresh auth headers (`auth: <signed token>` + `v`) so
+ * the connection is keyed — owner keys get services ENABLED immediately,
+ * non-owner keys register as pending host approval. hub-lite ignores the
+ * headers entirely (regression-safe). The wire contract matches the TS/Go
+ * reference — `hub/profile/update` and `hub/service/update` are re-sent on
+ * every (re)connect (the hub drops services on disconnect).
+ *
+ * Hub-bound auth (Docs/Devices/protocol.md section 2): with no pinned key for
+ * the address, the service connects with `v: 0`, calls `hub/info`, pins the
+ * returned key in `hubs.json` beside the key file and reconnects at once with
+ * `v: 1` tokens signed over `hub1:<hub key>:<expiry>`. A hub that doesn't
+ * answer `hub/info` (hub-lite) keeps getting v0. A refused v1 connect is
+ * reported ([lastError]), never silently downgraded; call [forgetHubKey]
+ * when the hub key really changed.
  *
  * @param address a port (Int) or a ws:// URL (String); default 1997 or $HUB.
  * @param name    profile name shown in the hub.
  * @param icon    profile icon: a String or a Map like
  *                `linkedMapOf("symbol" to "speaker.wave.2", "text" to "E")`.
  * @param sign    token factory for hub-pro auth (default: the keychain
- *                `auth` file in the cwd, TS parity); a fresh token is signed
- *                for every (re)connect.
+ *                `auth` file in the cwd, signing v1 tokens once the hub key
+ *                is pinned); a fresh token is signed for every (re)connect. A
+ *                custom factory always connects with `v: 0`.
+ * @param hubKey  the hub's SPKI if known up front (invitation or config);
+ *                null = learn and pin it via `hub/info`.
  */
 class Service(
   address: Any? = null,
   val name: String? = null,
   val icon: Any? = null,
   val sign: (() -> String)? = null,
+  hubKey: String? = null,
 ) {
   private val channel = Channel<Any?>()
   private val addressValue: Any =
     address ?: System.getenv("HUB")?.toIntOrNull() ?: System.getenv("HUB") ?: 1997
 
   internal val profile: Profile? = if (name != null || icon != null) Profile(name, icon) else null
+
+  private val pins: HubPins? = if (sign == null) HubPins.beside(Keychain.keyPath()) else null
+
+  /** The hub key v1 tokens are bound to, or null while connecting with v0. */
+  @Volatile
+  var hubKey: String? = hubKey ?: pins?.get(normalizeAddress(addressValue))
+    private set
+
+  /** The last connect error (e.g. a v1 connect refused with `invalid signature`), or null. */
+  @Volatile
+  var lastError: String? = null
+    private set
+
+  /** The address as `hubs.json` keys it ([normalizeAddress]). */
+  val addressKey: String get() = normalizeAddress(addressValue)
+
+  /**
+   * Clears the pinned hub key for this address, so the next connect uses v0
+   * and pins whatever key `hub/info` returns. Use it when a hub's key changed
+   * on purpose.
+   */
+  fun forgetHubKey() {
+    hubKey = null
+    pins?.remove(addressKey)
+  }
 
   // Every registered handler path (post, stream, app) in registration order;
   // the services list is built from it sorted by path (TS parity).
@@ -157,9 +194,11 @@ class Service(
           wasConnected = false
           client = null
         }
+        val headers = authHeaderMap()
         c = try {
-          connectClient()
+          connectClient(headers)
         } catch (e: Exception) {
+          reportConnectError(headers, e)
           Thread.sleep(1000)
           continue
         }
@@ -178,6 +217,14 @@ class Service(
       val connected = c.isConnected()
       if (connected && !wasConnected) {
         wasConnected = true
+        lastError = null
+        if (learnHubKey(c)) {
+          // Pinned the hub key: reconnect at once with a v1 token.
+          runCatching { c.stop() }
+          wasConnected = false
+          client = null
+          continue
+        }
         sendUpdates()
       } else if (!connected) {
         wasConnected = false
@@ -186,22 +233,74 @@ class Service(
     }
   }
 
-  private fun connectClient(): Client<Any?> = when (val a = addressValue) {
-    is Int -> channel.connect(a, ConnectOptions(headers = authHeaders()))
-    is String -> channel.connect(a, ConnectOptions(headers = authHeaders()))
-    else -> throw IllegalArgumentException("address must be an Int port or a ws:// String URL")
+  private fun connectClient(headers: Map<String, String>): Client<Any?> {
+    val options = ConnectOptions<Any?>(headers = rawHeaders(headers))
+    return when (val a = addressValue) {
+      is Int -> channel.connect(a, options)
+      is String -> channel.connect(a, options)
+      else -> throw IllegalArgumentException("address must be an Int port or a ws:// String URL")
+    }
   }
 
   /**
    * Fresh hub-pro auth headers for every (re)connect: a freshly signed token
-   * + protocol version (TS reference parity). [connectClient] runs this on
-   * every dial (initial connect and every reconnect), so each connection
-   * carries its own token. The channel-kotlin client appends the raw header
-   * string to the ws:// upgrade request; hub-lite ignores it (regression-safe).
+   * and the protocol version, `1` with a token bound to the pinned hub key,
+   * else `0`. [pollLoop] builds them on every dial (initial connect and every
+   * reconnect), so each connection carries its own token. hub-lite ignores
+   * them (regression-safe).
    */
-  internal fun authHeaders(): String {
-    val token = sign?.invoke() ?: Keychain.sign()
-    return "auth: $token\r\nv: 0"
+  internal fun authHeaderMap(): Map<String, String> {
+    val headers = linkedMapOf<String, String>()
+    val key = hubKey
+    val custom = sign
+    when {
+      custom != null -> {
+        headers["auth"] = custom()
+        headers["v"] = "0"
+      }
+      key != null -> {
+        headers["auth"] = Keychain.signHub(key)
+        headers["v"] = "1"
+      }
+      else -> {
+        headers["auth"] = Keychain.sign()
+        headers["v"] = "0"
+      }
+    }
+    return headers
+  }
+
+  /** [authHeaderMap] as the raw header lines the channel-kotlin client appends to the upgrade request. */
+  internal fun authHeaders(): String = rawHeaders(authHeaderMap())
+
+  private fun rawHeaders(headers: Map<String, String>): String =
+    headers.entries.joinToString("\r\n") { (name, value) -> "$name: $value" }
+
+  /**
+   * On a v0 connection with no pinned key, asks `hub/info` for the hub key
+   * and pins it. Returns true when a key was newly pinned.
+   */
+  private fun learnHubKey(c: Client<Any?>): Boolean {
+    val pins = pins ?: return false
+    if (hubKey != null) return false
+    val result = runCatching { c.send(Any::class.java, "hub/info", null, Unit) }.getOrNull() ?: return false
+    // hub-lite or an older hub-pro answers with an error: stay on v0.
+    val key = ((result as? CallResult.Ok)?.value as? Map<*, *>)?.get("key") as? String ?: return false
+    hubKey = key
+    // An unwritable pin file keeps the key for this process only.
+    runCatching { pins.put(addressKey, key) }
+    return true
+  }
+
+  private fun reportConnectError(headers: Map<String, String>, error: Exception) {
+    val message = generateSequence<Throwable>(error) { it.cause }.joinToString(": ") { it.message.toString() }
+    if (headers["v"] == "1" && "invalid signature" in message && message != lastError) {
+      System.err.println(
+        "hub-service: the hub at $addressKey refused the v1 token for hub key $hubKey (invalid signature). " +
+          "The hub key changed or a different server answers; call forgetHubKey() if the change is expected.",
+      )
+    }
+    lastError = message
   }
 
   private fun sendUpdates() {
@@ -215,6 +314,25 @@ class Service(
       c.send(Any::class.java, "hub/service/update", update(), Unit)
     } catch (e: Exception) {
       // Will be re-sent on the next reconnect.
+    }
+  }
+
+  companion object {
+    /**
+     * Normalizes a hub address like channel TS does (protocol.md section 2): a
+     * bare port becomes `ws://localhost:<port>`; a URL keeps its form with the
+     * scheme and host lowercased and no trailing slash.
+     */
+    fun normalizeAddress(address: Any): String {
+      if (address is Int) return "ws://localhost:$address"
+      var text = address.toString().trim()
+      if (text.isNotEmpty() && text.all { it.isDigit() }) return "ws://localhost:$text"
+      val schemeEnd = text.indexOf("://")
+      if (schemeEnd >= 0) {
+        val authorityEnd = text.indexOf('/', schemeEnd + 3).let { if (it < 0) text.length else it }
+        text = text.substring(0, authorityEnd).lowercase() + text.substring(authorityEnd)
+      }
+      return text.trimEnd('/')
     }
   }
 

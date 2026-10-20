@@ -7,9 +7,11 @@ Kotlin port of [hub-service](https://github.com/v57/hub-service) — connect to 
 [hub](https://github.com/v57/hub-lite) (default `127.0.0.1:1997`), host your own
 post/stream API endpoints, register apps, and call API through the hub.
 
-Lite port: no auth, no keychain, no crypto (hub-pro territory). The wire
-contract matches the TS reference (`hub/profile/update`, `hub/service/update`,
-AppInterface + element DSL). Built on
+Hub-pro auth is supported: every (re)connect sends `auth` + `v` headers signed
+by the ed25519 keychain (`auth` key file in the cwd, or `$HUBKEY`), bound to
+the hub's key once it is pinned (`v: 1`). hub-lite ignores the headers. The
+wire contract matches the TS reference (`hub/profile/update`,
+`hub/service/update`, AppInterface + element DSL). Built on
 [channel-kotlin](https://github.com/v57/channel-kotlin) via a Gradle composite
 build.
 
@@ -85,9 +87,14 @@ val response = service.send("echo/upper", "hello") // "HELLO"
 
 ## API
 
-- `Service(address?, name?, icon?)` — `address` is a port (Int) or a `ws://`
-  URL (String); default `1997` or `$HUB`. `name`/`icon` set the profile
-  (`hub/profile/update` is only sent when set)
+- `Service(address?, name?, icon?, sign?, hubKey?)` — `address` is a port
+  (Int) or a `ws://` URL (String); default `1997` or `$HUB`. `name`/`icon` set
+  the profile (`hub/profile/update` is only sent when set)
+- Hub-bound auth: the first connect uses `v: 0`, asks `hub/info` for the hub
+  key, pins it in `hubs.json` beside the key file and reconnects with `v: 1`
+  (`hubKey` supplies it up front, `forgetHubKey()` clears the pin,
+  `lastError` reports a refused connect). `Keychain.sign()` / `signHub(key)`
+  make the tokens
 - `post(path, settings? = null) { body -> response }` — register a
   request/response endpoint; throw `ChannelException` to signal an error
 - `stream(path, settings? = null) { body, emit -> ... }` — register a
