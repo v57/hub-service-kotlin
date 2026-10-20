@@ -120,7 +120,7 @@ class ServiceTest {
   @Test
   fun authHeadersDefaultSignViaKeychain() {
     // Real keychain token: key.<pub>.<sig>.<decimal-expiry>, fresh per call.
-    val s = Service()
+    val s = Service(device = false)
     val headers = s.authHeaders()
     val token = headers.removePrefix("auth: ").substringBefore("\r\n")
     val parts = token.split(".")

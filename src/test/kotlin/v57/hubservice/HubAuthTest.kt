@@ -46,7 +46,7 @@ class HubAuthTest {
   @Test
   fun connectsWithV0UntilAHubKeyIsKnown() {
     useTempKey()
-    val service = Service(address = 4100)
+    val service = Service(address = 4100, device = false)
     assertNull(service.hubKey)
     assertEquals("0", service.authHeaderMap()["v"])
   }
@@ -54,7 +54,7 @@ class HubAuthTest {
   @Test
   fun hubKeyOptionSignsV1() {
     useTempKey()
-    val headers = Service(address = 4100, hubKey = HUB_KEY).authHeaderMap()
+    val headers = Service(address = 4100, hubKey = HUB_KEY, device = false).authHeaderMap()
     assertEquals("1", headers["v"])
     val parts = headers.getValue("auth").split(".")
     assertTrue(verifies(parts[1], "hub1:$HUB_KEY:${parts[3]}", parts[2]))
@@ -66,10 +66,10 @@ class HubAuthTest {
     HubPins(tmp.resolve("hubs.json")).put("ws://localhost:4100", HUB_KEY)
     assertEquals("{\"ws://localhost:4100\":\"$HUB_KEY\"}", Files.readString(tmp.resolve("hubs.json")))
 
-    val service = Service(address = 4100)
+    val service = Service(address = 4100, device = false)
     assertEquals(HUB_KEY, service.hubKey)
     assertEquals("1", service.authHeaderMap()["v"])
-    assertNull(Service(address = "ws://other:1997").hubKey)
+    assertNull(Service(address = "ws://other:1997", device = false).hubKey)
 
     service.forgetHubKey()
     assertNull(service.hubKey)

@@ -95,6 +95,13 @@ val response = service.send("echo/upper", "hello") // "HELLO"
   (`hubKey` supplies it up front, `forgetHubKey()` clears the pin,
   `lastError` reports a refused connect). `Keychain.sign()` / `signHub(key)`
   make the tokens
+- Device mode (on by default): every connect also sends a `device` header, a
+  7-day certificate for the service key signed by the device key
+  (`~/.hub/device.key`, `$HUB_DEVICE_KEY` or `deviceKeyPath`, created 0600;
+  `deviceKey = KeyFile` for a key kept elsewhere), renewed at connect with
+  less than a day left. `instance` names the service on its device (default:
+  profile name, else first path segment, else `service`); `deviceName`,
+  `platform`, `parent` override the suggestions; `device = false` turns it off
 - `post(path, settings? = null) { body -> response }` — register a
   request/response endpoint; throw `ChannelException` to signal an error
 - `stream(path, settings? = null) { body, emit -> ... }` — register a

@@ -28,6 +28,12 @@ import kotlin.concurrent.thread
  * reported ([lastError]), never silently downgraded; call [forgetHubKey]
  * when the hub key really changed.
  *
+ * Device mode (protocol.md section 3, on by default): every connect also
+ * carries a `device` header, a certificate for the service key signed by the
+ * device key. It is created at connect when missing or with less than 24
+ * hours left (7-day lifetime). A device key that can't be read or created
+ * turns device mode off for this service.
+ *
  * @param address a port (Int) or a ws:// URL (String); default 1997 or $HUB.
  * @param name    profile name shown in the hub.
  * @param icon    profile icon: a String or a Map like
@@ -38,6 +44,16 @@ import kotlin.concurrent.thread
  *                custom factory always connects with `v: 0`.
  * @param hubKey  the hub's SPKI if known up front (invitation or config);
  *                null = learn and pin it via `hub/info`.
+ * @param device  device mode: send a device certificate with every connect.
+ * @param deviceKey a caller-provided device key (e.g. kept in an app's own
+ *                keychain); null = the device key file.
+ * @param deviceKeyPath the device key file; null = [Device.defaultKeyPath].
+ * @param instance the instance name on this device (`s3-local/Backup Disk`);
+ *                default: the profile name, else the first segment of the
+ *                first registered path, else `service`.
+ * @param deviceName the suggested device name; null = the computer name.
+ * @param platform the certificate platform; null = this OS.
+ * @param parent  the declared parent device name (containers and VMs).
  */
 class Service(
   address: Any? = null,
@@ -45,6 +61,13 @@ class Service(
   val icon: Any? = null,
   val sign: (() -> String)? = null,
   hubKey: String? = null,
+  device: Boolean = true,
+  private val deviceKey: KeyFile? = null,
+  private val deviceKeyPath: String? = null,
+  private val instance: String? = null,
+  private val deviceName: String? = null,
+  private val platform: String? = null,
+  private val parent: String? = null,
 ) {
   private val channel = Channel<Any?>()
   private val addressValue: Any =
@@ -66,6 +89,57 @@ class Service(
 
   /** The address as `hubs.json` keys it ([normalizeAddress]). */
   val addressKey: String get() = normalizeAddress(addressValue)
+
+  // A custom token factory hides the service key the certificate must name.
+  @Volatile
+  private var deviceMode = device && sign == null
+  private var resolvedDeviceKey: KeyFile? = null
+  private var certificate: String? = null
+  private var certificateExpiry = 0L
+  private var resolvedDeviceName: String? = null
+
+  /**
+   * The instance name the certificate carries: the option, else the profile
+   * name, else the first segment of the first registered path, else `service`.
+   */
+  fun instance(): String =
+    instance?.takeIf { it.isNotEmpty() }
+      ?: name?.takeIf { it.isNotEmpty() }
+      ?: paths.firstOrNull()?.substringBefore('/')
+      ?: "service"
+
+  /** The device key in use, or null before the first connect or with device mode off. */
+  val currentDeviceKey: KeyFile? @Synchronized get() = resolvedDeviceKey
+
+  /**
+   * The `device` header for the next connect, or null with device mode off.
+   * Reuses the current certificate while it has more than 24 hours left.
+   */
+  @Synchronized
+  internal fun deviceHeader(): String? {
+    if (!deviceMode) return null
+    return try {
+      val key = resolvedDeviceKey
+        ?: (deviceKey ?: Device.loadOrCreateKey(deviceKeyPath?.let { java.nio.file.Path.of(it) } ?: Device.defaultKeyPath()))
+          .also { resolvedDeviceKey = it }
+      val now = Keychain.now()
+      val current = certificate
+      if (current != null && certificateExpiry - now >= Device.RENEW_BEFORE) return current
+      val suggestedName = resolvedDeviceName ?: (deviceName ?: Device.defaultName()).also { resolvedDeviceName = it }
+      val exp = now + Device.CERTIFICATE_LIFETIME
+      val payload = Device.certificatePayload(
+        key.publicKey, Keychain.publicKey(), instance(), suggestedName, platform ?: Device.defaultPlatform(), parent, now, exp,
+      )
+      Device.certificate(key, payload).also {
+        certificate = it
+        certificateExpiry = exp
+      }
+    } catch (e: Exception) {
+      System.err.println("hub-service: device mode off: ${e.message}")
+      deviceMode = false
+      null
+    }
+  }
 
   /**
    * Clears the pinned hub key for this address, so the next connect uses v0
@@ -267,6 +341,7 @@ class Service(
         headers["v"] = "0"
       }
     }
+    deviceHeader()?.let { headers["device"] = it }
     return headers
   }
 
