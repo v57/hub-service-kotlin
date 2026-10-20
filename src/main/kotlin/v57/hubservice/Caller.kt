@@ -62,7 +62,8 @@ data class Caller(
  *
  * @property path    the API path called
  * @property body    the decoded request body
- * @property caller  who is calling (`context.hub.caller`); null when the hub sent none
+ * @property caller  who is calling (`context.hub.caller`); null when the hub sent none or when its
+ *                   `context.hub.hubKey` isn't the hub key this service pinned
  * @property hubKey  the forwarding hub's SPKI (`context.hub.hubKey`); null when the hub sent none
  * @property context the whole request context (selection keys such as `service` and `device` included)
  */
@@ -74,9 +75,16 @@ data class Request(
   val context: Map<*, *>,
 ) {
   companion object {
-    internal fun of(path: String, body: Any?, context: Any?): Request {
+    /**
+     * The request for [context]. The caller is trusted only when the context
+     * names [pinnedHubKey] as its hub (TS parity), so a service without a
+     * pinned key sees no caller.
+     */
+    internal fun of(path: String, body: Any?, context: Any?, pinnedHubKey: String?): Request {
       val map = context as? Map<*, *> ?: emptyMap<String, Any?>()
-      return Request(path, body, Caller.fromContext(map), Caller.hubKey(map), map)
+      val hubKey = Caller.hubKey(map)
+      val caller = if (pinnedHubKey != null && pinnedHubKey == hubKey) Caller.fromContext(map) else null
+      return Request(path, body, caller, hubKey, map)
     }
   }
 }

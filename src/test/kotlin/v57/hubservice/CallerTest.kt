@@ -11,10 +11,19 @@ class CallerTest {
   fun noHubContextMeansNoCaller() {
     assertNull(Caller.fromContext(null))
     assertNull(Caller.fromContext(mapOf("service" to "x")))
-    val request = Request.of("echo", "hi", null)
+    val request = Request.of("echo", "hi", null, "hub")
     assertNull(request.caller)
     assertNull(request.hubKey)
     assertEquals(emptyMap<String, Any?>(), request.context)
+  }
+
+  @Test
+  fun callerOnlyFromThePinnedHub() {
+    val context = mapOf("hub" to mapOf("caller" to mapOf("key" to "k", "owner" to true), "hubKey" to "hub-a"))
+    assertEquals("k", Request.of("p", null, context, "hub-a").caller?.key)
+    assertNull(Request.of("p", null, context, "hub-b").caller)
+    assertNull(Request.of("p", null, context, null).caller)
+    assertEquals("hub-a", Request.of("p", null, context, null).hubKey)
   }
 
   @Test

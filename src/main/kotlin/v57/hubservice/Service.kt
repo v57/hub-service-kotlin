@@ -49,8 +49,8 @@ import kotlin.concurrent.thread
  *                keychain); null = the device key file.
  * @param deviceKeyPath the device key file; null = [Device.defaultKeyPath].
  * @param instance the instance name on this device (`s3-local/Backup Disk`);
- *                default: the profile name, else the first segment of the
- *                first registered path, else `service`.
+ *                default: the profile name, else the working directory's
+ *                name, else `service`.
  * @param deviceName the suggested device name; null = the computer name.
  * @param platform the certificate platform; null = this OS.
  * @param parent  the declared parent device name (containers and VMs).
@@ -82,7 +82,7 @@ class Service(
   var hubKey: String? = hubKey ?: pins?.get(normalizeAddress(addressValue))
     private set
 
-  /** The last connect error (e.g. a v1 connect refused with `invalid signature`), or null. */
+  /** The last connect error (e.g. a v1 connect the hub refused with HTTP 401), or null. */
   @Volatile
   var lastError: String? = null
     private set
@@ -100,12 +100,12 @@ class Service(
 
   /**
    * The instance name the certificate carries: the option, else the profile
-   * name, else the first segment of the first registered path, else `service`.
+   * name, else the working directory's name, else `service`.
    */
   fun instance(): String =
     instance?.takeIf { it.isNotEmpty() }
       ?: name?.takeIf { it.isNotEmpty() }
-      ?: paths.firstOrNull()?.substringBefore('/')
+      ?: java.nio.file.Path.of("").toAbsolutePath().fileName?.toString()?.takeIf { it.isNotEmpty() }
       ?: "service"
 
   /** The device key in use, or null before the first connect or with device mode off. */
@@ -182,12 +182,13 @@ class Service(
 
   /**
    * Registers a request/response API endpoint whose [handler] also receives
-   * the [Request]: the caller identity the hub forwards ([Request.caller])
-   * and the whole request context.
+   * the [Request]: the caller identity the hub forwards ([Request.caller],
+   * only when the request's hub key is the pinned one) and the whole request
+   * context.
    */
   fun post(path: String, settings: ApiSettings? = null, handler: (Any?, Request) -> Any?): Service {
     addPath(path, settings)
-    channel.post<Any?, Any?, Any?>(path) { req -> handler(req.body, Request.of(req.path, req.body, req.context)) }
+    channel.post<Any?, Any?, Any?>(path) { req -> handler(req.body, Request.of(req.path, req.body, req.context, hubKey)) }
     return this
   }
 
@@ -210,7 +211,7 @@ class Service(
   fun stream(path: String, settings: ApiSettings? = null, handler: (Any?, Request, (Any?) -> Unit) -> Unit): Service {
     addPath(path, settings)
     channel.stream<Any?, Any?, Any?>(path) { req ->
-      handler(req.body, Request.of(req.path, req.body, req.context)) { item -> req.emitter.emit(item) }
+      handler(req.body, Request.of(req.path, req.body, req.context, hubKey)) { item -> req.emitter.emit(item) }
     }
     return this
   }
@@ -410,10 +411,12 @@ class Service(
 
   private fun reportConnectError(headers: Map<String, String>, error: Exception) {
     val message = generateSequence<Throwable>(error) { it.cause }.joinToString(": ") { it.message.toString() }
-    if (headers["v"] == "1" && "invalid signature" in message && message != lastError) {
+    // hub-pro refuses a bad token with HTTP 401 ("invalid websocket status 401" here); its reason
+    // (invalid signature, key revoked) stays on the hub, so any failed v1 dial is reported once.
+    if (headers["v"] == "1" && message != lastError) {
       System.err.println(
-        "hub-service: the hub at $addressKey refused the v1 token for hub key $hubKey (invalid signature). " +
-          "The hub key changed or a different server answers; call forgetHubKey() if the change is expected.",
+        "hub-service: v1 connect to $addressKey (hub key $hubKey) failed: $message. " +
+          "If the hub key changed or a different server answers, call forgetHubKey().",
       )
     }
     lastError = message

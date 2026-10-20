@@ -100,14 +100,15 @@ val response = service.send("echo/upper", "hello") // "HELLO"
   (`~/.hub/device.key`, `$HUB_DEVICE_KEY` or `deviceKeyPath`, created 0600;
   `deviceKey = KeyFile` for a key kept elsewhere), renewed at connect with
   less than a day left. `instance` names the service on its device (default:
-  profile name, else first path segment, else `service`); `deviceName`,
+  profile name, else the working directory's name, else `service`); `deviceName`,
   `platform`, `parent` override the suggestions; `device = false` turns it off
 - `post(path, settings? = null) { body -> response }` — register a
   request/response endpoint; throw `ChannelException` to signal an error
 - `post(path, settings? = null) { body, request -> response }` — the handler
   also gets the `Request`: `caller` (who is calling, from the hub's
   `context.hub.caller`: `key`, `deviceId`, `deviceName`, `groups`, `owner`,
-  and `via`/`claimed` through a merged hub; null on hubs that don't send it),
+  and `via`/`claimed` through a merged hub; null on hubs that don't send it,
+  and unless the request's `context.hub.hubKey` is the pinned hub key),
   `hubKey` and the whole `context`
 - `stream(path, settings? = null) { body, emit -> ... }` — register a
   streaming endpoint; call `emit(value)` per yielded value (also

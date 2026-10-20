@@ -85,11 +85,9 @@ class DeviceTest {
   fun instanceDefaults() {
     assertEquals("s3-local/Backup Disk", service(name = "Backup", instance = "s3-local/Backup Disk").instance())
     assertEquals("Backup", service(name = "Backup").instance())
-    val byPath = service()
-    assertEquals("service", byPath.instance())
-    byPath.post("s3/read") { it }
-    byPath.post("other/x") { it }
-    assertEquals("s3", byPath.instance())
+    val unnamed = service()
+    unnamed.post("s3/read") { it }
+    assertEquals(Path.of("").toAbsolutePath().fileName.toString(), unnamed.instance())
   }
 
   @Test
