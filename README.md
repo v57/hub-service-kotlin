@@ -114,6 +114,14 @@ val response = service.send("echo/upper", "hello") // "HELLO"
   streaming endpoint; call `emit(value)` per yielded value (also
   `{ body, request, emit -> }`)
 - `stop()` — stops the poll thread and closes the connection
+- Hub Network shares (TS `publishShare` parity): `share(name, protocol, host,
+  port, policy?)` declares one before `start()` (republished on every
+  connect); `publishShare(...)`, `updateShare(name, policy?, port?)` and
+  `removeShare(name)` change the set at runtime. The local hub-net agent
+  attests each share over its Unix socket (`$HUB_NET_AGENT_SOCKET`, else
+  `/var/run/hub-net/agent.sock` on macOS, `/run/hub-net/agent.sock` on Linux;
+  `network.agentSocket` overrides it), then the set goes to the hub with
+  `network/shares/replace`. `network.publications` lists the results
 - `app(app: App)` — header goes to the hub apps list; the app path streams the
   AppInterface (`header`, `body`, `top`, `bottom`, `data` — all five keys)
 - `send(path, body?)` — client call through the hub

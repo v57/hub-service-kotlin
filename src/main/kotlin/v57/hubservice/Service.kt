@@ -229,6 +229,52 @@ class Service(
     return this
   }
 
+  /** Hub Network share publication: agent socket settings and the current publications. */
+  val network = NetworkPublisher()
+
+  /**
+   * Declares a Hub Network share before [start]: the local `host:port` is
+   * published under [shareName] on connect and after every reconnect.
+   * [policy] is `mapOf("mode" to "hub" | "private" | "disabled")`,
+   * `mapOf("mode" to "group", "group" to ..)` or `mapOf("mode" to "keys",
+   * "keys" to listOf(..))`; null means private.
+   */
+  fun share(shareName: String, protocol: String, host: String, port: Int, policy: Map<String, Any?>? = null): Service {
+    network.declare(NetworkPublisher.Share(shareName, protocol, host, port, policy ?: PRIVATE))
+    return this
+  }
+
+  /**
+   * Publishes a Hub Network share now (TS `publishShare`): the local hub-net
+   * agent attests the port, then the declared set goes to the hub. Returns
+   * every current publication. Requires [start].
+   */
+  fun publishShare(
+    shareName: String,
+    protocol: String,
+    host: String,
+    port: Int,
+    policy: Map<String, Any?>? = null,
+  ): List<Map<String, Any?>> =
+    network.publish(NetworkPublisher.Share(shareName, protocol, host, port, policy ?: PRIVATE), shareKey(), ::replaceShares)
+
+  /** Changes a published share's [policy] and/or [port] (null keeps the current one) and republishes. */
+  fun updateShare(shareName: String, policy: Map<String, Any?>? = null, port: Int? = null): List<Map<String, Any?>> {
+    val current = network.declaredShares.firstOrNull { it.name == shareName }
+      ?: throw IllegalArgumentException("Share '$shareName' not found")
+    return network.publish(current.copy(policy = policy ?: current.policy, port = port ?: current.port), shareKey(), ::replaceShares)
+  }
+
+  /** Removes a share and republishes the rest. */
+  fun removeShare(shareName: String): List<Map<String, Any?>> = network.remove(shareName, shareKey(), ::replaceShares)
+
+  private fun shareKey(): KeyFile {
+    check(sign == null) { "Share publication needs the keychain service key, not a custom sign" }
+    return Keychain.key()
+  }
+
+  private fun replaceShares(body: Any?): Any? = send("network/shares/replace", body)
+
   /** Builds the current `hub/service/update` payload (services + apps). */
   fun update(): Map<String, Any?> {
     val services = paths.sorted().map { path ->
@@ -434,9 +480,23 @@ class Service(
     } catch (e: Exception) {
       // Will be re-sent on the next reconnect.
     }
+    if (network.hasShares && sign == null) {
+      try {
+        network.republishAll(Keychain.key()) { body ->
+          when (val result = c.send(Any::class.java, "network/shares/replace", body, Unit)) {
+            is CallResult.Ok -> result.value
+            is CallResult.RemoteErr -> throw ChannelException(result.error)
+          }
+        }
+      } catch (e: Exception) {
+        System.err.println("hub-service: failed to republish network shares: ${e.message}")
+      }
+    }
   }
 
   companion object {
+    private val PRIVATE = mapOf<String, Any?>("mode" to "private")
+
     /**
      * Normalizes a hub address like channel TS does (protocol.md section 2): a
      * bare port becomes `ws://localhost:<port>`; a URL keeps its form with the
