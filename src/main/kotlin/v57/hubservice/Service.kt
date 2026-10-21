@@ -9,10 +9,10 @@ import java.util.LinkedHashSet
 import kotlin.concurrent.thread
 
 /**
- * Registers API endpoints on a hub (hub-lite/hub-pro) and serves calls
+ * Registers API endpoints on a hub (hub-lite/hub-server) and serves calls
  * forwarded by it; also lets this process call API through the hub.
  *
- * Port of hub-service (TS reference) with hub-pro auth: on every (re)connect
+ * Port of hub-service (TS reference) with hub-server auth: on every (re)connect
  * the client attaches fresh auth headers (`auth: <signed token>` + `v`) so
  * the connection is keyed — owner keys get services ENABLED immediately,
  * non-owner keys register as pending host approval. hub-lite ignores the
@@ -38,7 +38,7 @@ import kotlin.concurrent.thread
  * @param name    profile name shown in the hub.
  * @param icon    profile icon: a String or a Map like
  *                `linkedMapOf("symbol" to "speaker.wave.2", "text" to "E")`.
- * @param sign    token factory for hub-pro auth (default: the keychain
+ * @param sign    token factory for hub-server auth (default: the keychain
  *                `auth` file in the cwd, signing v1 tokens once the hub key
  *                is pinned); a fresh token is signed for every (re)connect. A
  *                custom factory always connects with `v: 0`.
@@ -405,7 +405,7 @@ class Service(
   }
 
   /**
-   * Fresh hub-pro auth headers for every (re)connect: a freshly signed token
+   * Fresh hub-server auth headers for every (re)connect: a freshly signed token
    * and the protocol version, `1` with a token bound to the pinned hub key,
    * else `0`. [pollLoop] builds them on every dial (initial connect and every
    * reconnect), so each connection carries its own token. hub-lite ignores
@@ -457,7 +457,7 @@ class Service(
 
   private fun reportConnectError(headers: Map<String, String>, error: Exception) {
     val message = generateSequence<Throwable>(error) { it.cause }.joinToString(": ") { it.message.toString() }
-    // hub-pro refuses a bad token with HTTP 401 ("invalid websocket status 401" here); its reason
+    // hub-server refuses a bad token with HTTP 401 ("invalid websocket status 401" here); its reason
     // (invalid signature, key revoked) stays on the hub, so any failed v1 dial is reported once.
     if (headers["v"] == "1" && message != lastError) {
       System.err.println(
