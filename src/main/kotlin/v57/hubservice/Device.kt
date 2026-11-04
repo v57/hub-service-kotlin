@@ -39,8 +39,10 @@ object Device {
   fun id(publicKey: String): String = hex(publicKey).substring(0, 32)
 
   /** The safety code shown while approving: `"ddd ddd"`. */
-  fun safetyCode(publicKey: String): String {
-    val code = "%06d".format(hex(publicKey).substring(0, 8).toLong(16) % 1_000_000)
+  fun safetyCode(hubKey: String, deviceKey: String, codeValue: String): String {
+    val hash = java.security.MessageDigest.getInstance("SHA-256").digest("hubcode1:$hubKey:$deviceKey:$codeValue".toByteArray())
+    val prefix = hash.take(4).joinToString("") { "%02x".format(it) }
+    val code = "%06d".format(prefix.toLong(16) % 1_000_000)
     return "${code.substring(0, 3)} ${code.substring(3)}"
   }
 

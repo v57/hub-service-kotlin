@@ -32,7 +32,10 @@ class VectorsTest {
   fun deviceIdAndSafetyCode() {
     val device = at("keys", "device")
     assertEquals(device["deviceId"], Device.id(publicKey("device")))
-    assertEquals(device["safetyCode"], Device.safetyCode(publicKey("device")))
+    @Suppress("UNCHECKED_CAST")
+    for (code in at("safetyCode")["cases"] as List<Map<String, Any?>>) {
+      assertEquals(code["code"], Device.safetyCode(code["hubKey"] as String, code["deviceKey"] as String, code["codeValue"] as String))
+    }
   }
 
   @Test
