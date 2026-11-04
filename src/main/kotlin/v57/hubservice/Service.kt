@@ -9,24 +9,25 @@ import java.util.LinkedHashSet
 import kotlin.concurrent.thread
 
 /**
- * Registers API endpoints on a hub (hub-lite/hub-server) and serves calls
+ * Registers API endpoints on a hub (hub-server) and serves calls
  * forwarded by it; also lets this process call API through the hub.
  *
  * Port of hub-service (TS reference) with hub-server auth: on every (re)connect
  * the client attaches fresh auth headers (`auth: <signed token>` + `v`) so
  * the connection is keyed — owner keys get services ENABLED immediately,
- * non-owner keys register as pending host approval. hub-lite ignores the
- * headers entirely (regression-safe). The wire contract matches the TS/Go
- * reference — `hub/profile/update` and `hub/service/update` are re-sent on
- * every (re)connect (the hub drops services on disconnect).
+ * non-owner keys register as pending host approval. The wire contract matches
+ * the TS/Go reference — `hub/profile/update` and `hub/service/update` are re-sent
+ * on every (re)connect (the hub drops services on disconnect).
  *
- * Hub-bound auth (Docs/Devices/protocol.md section 2): with no pinned key for
- * the address, the service connects with `v: 0`, calls `hub/info`, pins the
- * returned key in `hubs.json` beside the key file and reconnects at once with
- * `v: 1` tokens signed over `hub1:<hub key>:<expiry>`. A hub that doesn't
- * answer `hub/info` (hub-lite) keeps getting v0. A refused v1 connect is
- * reported ([lastError]), never silently downgraded; call [forgetHubKey]
- * when the hub key really changed.
+ * Auth v2 (Docs/Devices/protocol.md section 2): before every connect the service
+ * asks `hub/info` on a short anonymous connection with a fresh nonce. Only an
+ * answer with a valid proof of the key it claims gets a token, over that answer's
+ * challenge; the first proven key is pinned in `hubs.json` beside the key file. A
+ * hub that doesn't prove its key, or answers with another than the pinned one,
+ * gets nothing and is reported ([lastError]) while the service keeps trying with
+ * a growing delay, and calls wait. Call [forgetHubKey] when the hub key really
+ * changed. Plain `ws://` beyond loopback, the overlay and the LAN isn't dialed
+ * unless [allowPlaintext] says so.
  *
  * Device mode (protocol.md section 3, on by default): every connect also
  * carries a `device` header, a certificate for the service key signed by the
@@ -38,12 +39,11 @@ import kotlin.concurrent.thread
  * @param name    profile name shown in the hub.
  * @param icon    profile icon: a String or a Map like
  *                `linkedMapOf("symbol" to "speaker.wave.2", "text" to "E")`.
- * @param sign    token factory for hub-server auth (default: the keychain
- *                `auth` file in the cwd, signing v1 tokens once the hub key
- *                is pinned); a fresh token is signed for every (re)connect. A
- *                custom factory always connects with `v: 0`.
+ * @param sign    token factory for hub-server auth, given the key the hub proved
+ *                and the challenge of this connect (default: the keychain `auth`
+ *                file in the cwd); a fresh token is signed for every (re)connect.
  * @param hubKey  the hub's SPKI if known up front (invitation or config);
- *                null = learn and pin it via `hub/info`.
+ *                null = pin the first key a hub proves.
  * @param device  device mode: send a device certificate with every connect.
  * @param deviceKey a caller-provided device key (e.g. kept in an app's own
  *                keychain); null = the device key file.
@@ -54,12 +54,16 @@ import kotlin.concurrent.thread
  * @param deviceName the suggested device name; null = the computer name.
  * @param platform the certificate platform; null = this OS.
  * @param parent  the declared parent device name (containers and VMs).
+ * @param allowPlaintext dial plain `ws://` beyond loopback, the overlay and the
+ *                LAN, which would carry the service's key unencrypted: for private
+ *                networks the SDK can't recognize, such as a container's
+ *                `ws://hub:1997`. Also `HUB_ALLOW_PLAINTEXT=1`.
  */
 class Service(
   address: Any? = null,
   val name: String? = null,
   val icon: Any? = null,
-  val sign: (() -> String)? = null,
+  val sign: ((hubKey: String, challenge: String) -> String)? = null,
   hubKey: String? = null,
   device: Boolean = true,
   private val deviceKey: KeyFile? = null,
@@ -68,21 +72,28 @@ class Service(
   private val deviceName: String? = null,
   private val platform: String? = null,
   private val parent: String? = null,
+  allowPlaintext: Boolean = false,
 ) {
   private val channel = Channel<Any?>()
   private val addressValue: Any =
-    address ?: System.getenv("HUB")?.toIntOrNull() ?: System.getenv("HUB") ?: 1997
+    (address as? String)?.trim()?.toIntOrNull() ?: address ?: System.getenv("HUB")?.toIntOrNull() ?: System.getenv("HUB") ?: 1997
+
+  private val allowPlaintext = allowPlaintext || System.getenv("HUB_ALLOW_PLAINTEXT") == "1"
+
+  /** Why [start] dialed nothing. */
+  @Volatile
+  private var refusal: String? = null
 
   internal val profile: Profile? = if (name != null || icon != null) Profile(name, icon) else null
 
-  private val pins: HubPins? = if (sign == null) HubPins.beside(Keychain.keyPath()) else null
+  private val pins: HubPins = HubPins.beside(Keychain.keyPath())
 
-  /** The hub key v1 tokens are bound to, or null while connecting with v0. */
+  /** The hub key this address is pinned to, or null until a hub proved one. */
   @Volatile
-  var hubKey: String? = hubKey ?: pins?.get(normalizeAddress(addressValue))
+  var hubKey: String? = hubKey ?: pins.get(normalizeAddress(addressValue))
     private set
 
-  /** The last connect error (e.g. a v1 connect the hub refused with HTTP 401), or null. */
+  /** The last connect error (a hub that didn't prove its key, a connect it refused with HTTP 401), or null. */
   @Volatile
   var lastError: String? = null
     private set
@@ -142,13 +153,12 @@ class Service(
   }
 
   /**
-   * Clears the pinned hub key for this address, so the next connect uses v0
-   * and pins whatever key `hub/info` returns. Use it when a hub's key changed
-   * on purpose.
+   * Clears the pinned hub key for this address, so the next connect pins what
+   * the hub proves. Use it when a hub's key changed on purpose.
    */
   fun forgetHubKey() {
     hubKey = null
-    pins?.remove(addressKey)
+    pins.remove(addressKey)
   }
 
   // Every registered handler path (post, stream, app) in registration order;
@@ -298,12 +308,13 @@ class Service(
   }
 
   /**
-   * Calls an API through the hub (client side). Returns the decoded response,
-   * or throws [IllegalStateException] if the service is not started and
-   * [ChannelException] if the hub reports a remote error.
+   * Calls an API through the hub (client side). While the service is started and
+   * not connected yet the call waits. Returns the decoded response, or throws
+   * [IllegalStateException] if the service is not started and [ChannelException]
+   * if the hub reports a remote error.
    */
   fun send(path: String, body: Any? = null): Any? {
-    val c = client ?: throw IllegalStateException("Service not started")
+    val c = connectedClient()
     return when (val result = c.send(Any::class.java, path, body, Unit)) {
       is CallResult.Ok -> result.value
       is CallResult.RemoteErr -> throw ChannelException(result.error)
@@ -312,8 +323,18 @@ class Service(
 
   /** Opens a stream call through the hub (client side). */
   fun values(path: String, body: Any? = null): Values<Any> {
-    val c = client ?: throw IllegalStateException("Service not started")
+    val c = connectedClient()
     return c.values(Any::class.java, path, body, Unit)
+  }
+
+  /** The connection. While the service is started and has none yet, the caller waits for one. */
+  private fun connectedClient(): Client<Any?> {
+    while (true) {
+      refusal?.let { throw IllegalStateException(it) }
+      client?.let { return it }
+      if (!started.get() || stopped) throw IllegalStateException("Service not started")
+      Thread.sleep(10)
+    }
   }
 
   /**
@@ -325,9 +346,17 @@ class Service(
    * detected by polling [Client.poll] + [Client.isConnected]. The client does
    * not auto-reconnect — when the connection drops the poll thread dials a
    * fresh connection, which re-triggers the updates (the hub drops services
-   * on disconnect).
+   * on disconnect). An address that would carry the key unencrypted isn't dialed.
    */
   fun start(): Service {
+    refusal = null
+    if (!allowPlaintext && HubTransport.of(addressValue) == HubTransport.REFUSED) {
+      val reason = "$addressKey would carry this service's key unencrypted. Use wss://, or set allowPlaintext " +
+        "(HUB_ALLOW_PLAINTEXT=1) on a private network"
+      refusal = reason
+      System.err.println("hub-service: $reason")
+      return this
+    }
     if (started.getAndSet(true)) return this
     pollThread = thread(name = "hub-service") {
       try {
@@ -339,7 +368,7 @@ class Service(
     return this
   }
 
-  /** Stops the poll thread and closes the connection. */
+  /** Stops the poll thread and closes the connection. A handshake waiting to try again ends with it. */
   fun stop() {
     stopped = true
     pollThread?.interrupt()
@@ -356,11 +385,12 @@ class Service(
           wasConnected = false
           client = null
         }
-        val headers = authHeaderMap()
+        val headers = authHeaderMap() ?: return
         c = try {
           connectClient(headers)
         } catch (e: Exception) {
-          reportConnectError(headers, e)
+          if (stopped) return
+          reportConnectError(e)
           Thread.sleep(1000)
           continue
         }
@@ -380,13 +410,6 @@ class Service(
       if (connected && !wasConnected) {
         wasConnected = true
         lastError = null
-        if (learnHubKey(c)) {
-          // Pinned the hub key: reconnect at once with a v1 token.
-          runCatching { c.stop() }
-          wasConnected = false
-          client = null
-          continue
-        }
         sendUpdates()
       } else if (!connected) {
         wasConnected = false
@@ -396,7 +419,7 @@ class Service(
   }
 
   private fun connectClient(headers: Map<String, String>): Client<Any?> {
-    val options = ConnectOptions<Any?>(headers = rawHeaders(headers))
+    val options = ConnectOptions<Any?>(headers = rawHeaders(headers), connectTimeoutMillis = CONNECT_TIMEOUT_MS)
     return when (val a = addressValue) {
       is Int -> channel.connect(a, options)
       is String -> channel.connect(a, options)
@@ -405,66 +428,72 @@ class Service(
   }
 
   /**
-   * Fresh hub-server auth headers for every (re)connect: a freshly signed token
-   * and the protocol version, `1` with a token bound to the pinned hub key,
-   * else `0`. [pollLoop] builds them on every dial (initial connect and every
-   * reconnect), so each connection carries its own token. hub-lite ignores
-   * them (regression-safe).
+   * Runs before every connection attempt (protocol.md section 2). Comes back with
+   * a token over a fresh challenge from a hub that proved its key; until one has,
+   * it holds the attempt back, so nothing goes out and calls keep waiting. Null
+   * once the service is stopped.
    */
-  internal fun authHeaderMap(): Map<String, String> {
-    val headers = linkedMapOf<String, String>()
-    val key = hubKey
-    val custom = sign
-    when {
-      custom != null -> {
-        headers["auth"] = custom()
-        headers["v"] = "0"
+  private fun authHeaderMap(): Map<String, String>? {
+    var delay = HANDSHAKE_RETRY_MS
+    while (!stopped) {
+      try {
+        return handshake()
+      } catch (e: Exception) {
+        if (stopped) return null
+        report("$addressKey: ${e.message}, sending it nothing")
       }
-      key != null -> {
-        headers["auth"] = Keychain.signHub(key)
-        headers["v"] = "1"
-      }
-      else -> {
-        headers["auth"] = Keychain.sign()
-        headers["v"] = "0"
+      Thread.sleep(delay)
+      delay = minOf(delay * 2, HANDSHAKE_MAX_RETRY_MS)
+    }
+    return null
+  }
+
+  /** Asks the hub for its proof, checks it against the pin and signs for that answer alone. */
+  private fun handshake(): Map<String, String> {
+    val info = HubProof.ask(addressValue, HUB_INFO_TIMEOUT_MS)
+    val key = info.key!!
+    val pinned = hubKey ?: pins.get(addressKey)
+    check(pinned == null || pinned == key) {
+      "it answers with key $key, not the pinned $pinned. Call forgetHubKey() if its key really changed"
+    }
+    hubKey = key
+    if (pinned == null) {
+      try {
+        pins.put(addressKey, key)
+      } catch (e: Exception) {
+        // An unwritable pin file keeps the key for this process only.
+        System.err.println("hub-service: pin hub key: ${e.message}")
       }
     }
+    return signedHeaders(key, info.challenge!!)
+  }
+
+  /** The headers for one connect: a token over [challenge] and the device certificate. */
+  internal fun signedHeaders(key: String, challenge: String): Map<String, String> {
+    val headers = linkedMapOf<String, String>()
+    headers["auth"] = sign?.invoke(key, challenge) ?: Keychain.signHub(key, challenge)
+    headers["v"] = Keychain.AUTH_VERSION
     deviceHeader()?.let { headers["device"] = it }
     return headers
   }
 
-  /** [authHeaderMap] as the raw header lines the channel-kotlin client appends to the upgrade request. */
-  internal fun authHeaders(): String = rawHeaders(authHeaderMap())
-
-  private fun rawHeaders(headers: Map<String, String>): String =
+  /** [signedHeaders] as the raw header lines the channel-kotlin client appends to the upgrade request. */
+  internal fun rawHeaders(headers: Map<String, String>): String =
     headers.entries.joinToString("\r\n") { (name, value) -> "$name: $value" }
 
-  /**
-   * On a v0 connection with no pinned key, asks `hub/info` for the hub key
-   * and pins it. Returns true when a key was newly pinned.
-   */
-  private fun learnHubKey(c: Client<Any?>): Boolean {
-    val pins = pins ?: return false
-    if (hubKey != null) return false
-    val result = runCatching { c.send(Any::class.java, "hub/info", null, Unit) }.getOrNull() ?: return false
-    // hub-lite or an older hub-pro answers with an error: stay on v0.
-    val key = ((result as? CallResult.Ok)?.value as? Map<*, *>)?.get("key") as? String ?: return false
-    hubKey = key
-    // An unwritable pin file keeps the key for this process only.
-    runCatching { pins.put(addressKey, key) }
-    return true
-  }
-
-  private fun reportConnectError(headers: Map<String, String>, error: Exception) {
+  private fun reportConnectError(error: Exception) {
     val message = generateSequence<Throwable>(error) { it.cause }.joinToString(": ") { it.message.toString() }
     // hub-server refuses a bad token with HTTP 401 ("invalid websocket status 401" here); its reason
-    // (invalid signature, key revoked) stays on the hub, so any failed v1 dial is reported once.
-    if (headers["v"] == "1" && message != lastError) {
-      System.err.println(
-        "hub-service: v1 connect to $addressKey (hub key $hubKey) failed: $message. " +
-          "If the hub key changed or a different server answers, call forgetHubKey().",
-      )
-    }
+    // (invalid signature, key revoked) stays on the hub, so any failed dial is reported once.
+    report(
+      "connect to $addressKey (hub key $hubKey) failed: $message. " +
+        "If the hub key changed or a different server answers, call forgetHubKey().",
+    )
+  }
+
+  /** Records a failure, and reports it once per distinct message. */
+  private fun report(message: String) {
+    if (message != lastError) System.err.println("hub-service: $message")
     lastError = message
   }
 
@@ -496,6 +525,14 @@ class Service(
 
   companion object {
     private val PRIVATE = mapOf<String, Any?>("mode" to "private")
+
+    /** Bounds the `hub/info` question before a connect, and the connect. */
+    private const val HUB_INFO_TIMEOUT_MS = 5_000L
+    private const val CONNECT_TIMEOUT_MS = 5_000L
+
+    /** Retry delays for a hub that doesn't prove its key, or can't be reached. */
+    private const val HANDSHAKE_RETRY_MS = 1_000L
+    private const val HANDSHAKE_MAX_RETRY_MS = 30_000L
 
     /**
      * Normalizes a hub address like channel TS does (protocol.md section 2): a

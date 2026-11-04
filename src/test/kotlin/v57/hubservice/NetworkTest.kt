@@ -179,7 +179,9 @@ class NetworkTest {
   @Test
   fun declaredSharesArePublishedOnConnect() {
     val replaced = CopyOnWriteArrayList<Any?>()
+    val proving = FakeHub.proving("hub")
     val hub = Channel<Map<String, String>>()
+      .post<Any?, Any?, Unit>("hub/info") { req -> proving(FakeHub.nonce(req.body), "challenge") }
       .post<Any?, Any?, Unit>("hub/service/update") { null }
       .post<Any?, Any?, Unit>("network/shares/replace") { req ->
         replaced += req.body

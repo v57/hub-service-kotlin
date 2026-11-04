@@ -21,6 +21,9 @@ class DeviceTest {
     Keychain.setKeyPath(null)
   }
 
+  /** What a connect to a hub that proved its key sends. */
+  private fun Service.headers() = signedHeaders("hub-key", "challenge")
+
   private fun service(
     name: String? = null,
     instance: String? = null,
@@ -52,7 +55,7 @@ class DeviceTest {
   @Test
   fun connectHeadersCarryASignedCertificate() {
     val service = service(name = "Echo", deviceName = "Mac Studio", platform = "macos")
-    val headers = service.authHeaderMap()
+    val headers = service.headers()
     val header = headers.getValue("device")
     val parts = header.split(".")
     assertEquals(2, parts.size)
@@ -72,13 +75,13 @@ class DeviceTest {
     assertEquals(Device.CERTIFICATE_LIFETIME, exp - iat)
     assertTrue(abs(iat - Keychain.now()) <= 2)
     // The raw header lines carry it too.
-    assertTrue(service.authHeaders().contains("\r\ndevice: $header"))
+    assertTrue(service.rawHeaders(service.headers()).contains("\r\ndevice: $header"))
   }
 
   @Test
   fun certificateIsReusedUntilRenewal() {
     val service = service()
-    assertSame(service.authHeaderMap()["device"], service.authHeaderMap()["device"])
+    assertSame(service.headers()["device"], service.headers()["device"])
   }
 
   @Test
@@ -93,19 +96,19 @@ class DeviceTest {
   @Test
   fun parentIsDeclared() {
     val service = service(deviceName = "builder", platform = "linux", parent = "Mac Studio")
-    assertEquals("Mac Studio", Device.decodeCertificate(service.authHeaderMap().getValue("device"))["parent"])
+    assertEquals("Mac Studio", Device.decodeCertificate(service.headers().getValue("device"))["parent"])
   }
 
   @Test
   fun deviceModeCanBeTurnedOff() {
-    assertNull(service(device = false).authHeaderMap()["device"])
+    assertNull(service(device = false).headers()["device"])
     assertFalse(Files.exists(tmp.resolve("dev/device.key")))
   }
 
   @Test
   fun callerProvidedKeyIsUsed() {
     val key = KeyFile.generate()
-    val header = service(deviceKey = key).authHeaderMap().getValue("device")
+    val header = service(deviceKey = key).headers().getValue("device")
     assertEquals(key.publicKey, Device.decodeCertificate(header)["device"])
     assertFalse(Files.exists(tmp.resolve("dev/device.key")))
   }
@@ -115,7 +118,7 @@ class DeviceTest {
     val path = tmp.resolve("bad.key")
     Files.writeString(path, "garbage")
     Keychain.setKeyPath(tmp.resolve("auth").toString())
-    val headers = Service(deviceKeyPath = path.toString()).authHeaderMap()
+    val headers = Service(deviceKeyPath = path.toString()).headers()
     assertNull(headers["device"])
     assertNotNull(headers["auth"])
   }

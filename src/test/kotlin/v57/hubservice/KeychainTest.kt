@@ -31,7 +31,7 @@ class KeychainTest {
     val pubKey = KeyFactory.getInstance("Ed25519").generatePublic(X509EncodedKeySpec(pubDer))
     val ok = Signature.getInstance("Ed25519").run {
       initVerify(pubKey)
-      update(parts[3].toByteArray(Charsets.UTF_8))
+      update("hub1:hub-key:nonce:${parts[3]}".toByteArray(Charsets.UTF_8))
       verify(Base64.getDecoder().decode(parts[2]))
     }
     return parts[1] to ok
@@ -40,9 +40,9 @@ class KeychainTest {
   @Test
   fun tokenShape() {
     Keychain.setKeyPath(tempAuth())
-    val token = Keychain.sign()
+    val token = Keychain.signHub("hub-key", "nonce")
     val parts = token.split(".")
-    assertEquals(4, parts.size, "key.<pub>.<sig>.<expiry>")
+    assertEquals(5, parts.size, "key.<pub>.<sig>.<expiry>.<nonce>")
     assertEquals("key", parts[0])
     assertTrue(parts[3].all { it.isDigit() }, "expiry is a decimal epoch string: ${parts[3]}")
     assertEquals(Keychain.publicKey(), parts[1], "pub part is the keychain public key")
@@ -51,9 +51,9 @@ class KeychainTest {
   @Test
   fun signatureVerifiesAgainstPublicKey() {
     Keychain.setKeyPath(tempAuth())
-    val token = Keychain.sign(expires = 10)
+    val token = Keychain.signHub("hub-key", "nonce", expires = 10)
     val (_, ok) = verifyToken(token)
-    assertTrue(ok, "signature over the expiry string must verify against the pub key")
+    assertTrue(ok, "signature over the signed string must verify against the pub key")
   }
 
   @Test
@@ -66,7 +66,7 @@ class KeychainTest {
     assertEquals(92, raw.size, "48-byte PKCS8 private + 44-byte SPKI public")
     val embedded = Base64.getEncoder().encodeToString(raw.copyOfRange(48, 92))
     assertEquals(embedded, pub, "public key is bytes 48..92 of the file")
-    val token = Keychain.sign()
+    val token = Keychain.signHub("hub-key", "nonce")
     val (tokenPub, ok) = verifyToken(token)
     assertEquals(embedded, tokenPub)
     assertTrue(ok, "reloaded key signs tokens that verify against the file's pub key")
@@ -79,7 +79,7 @@ class KeychainTest {
     val tsPub = "MCowBQYDK2VwAyEAHZSDpmbLRjLrOyNMugsStFqK5EYcNluUekE4di+FalQ="
     Keychain.setKeyPath(tempAuth(tsAuth))
     assertEquals(tsPub, Keychain.publicKey(), "reproduces the TS public key")
-    val token = Keychain.sign()
+    val token = Keychain.signHub("hub-key", "nonce")
     val (tokenPub, ok) = verifyToken(token)
     assertEquals(tsPub, tokenPub)
     assertTrue(ok, "token signed by the TS test key")

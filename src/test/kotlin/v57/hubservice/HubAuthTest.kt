@@ -6,10 +6,15 @@ import java.security.KeyFactory
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -24,40 +29,184 @@ fun verifies(publicKey: String, data: String, signature: String): Boolean {
   }
 }
 
+fun await(condition: () -> Boolean) {
+  val deadline = System.currentTimeMillis() + 10_000
+  while (!condition()) {
+    if (System.currentTimeMillis() > deadline) throw AssertionError("timed out")
+    Thread.sleep(10)
+  }
+}
+
 class HubAuthTest {
   private val tmp: Path = Files.createTempDirectory("hubservice-auth")
+  private var service: Service? = null
+  private var hub: FakeHub? = null
 
   @AfterTest
   fun reset() {
+    service?.stop()
+    hub?.stop()
     Keychain.setKeyPath(null)
   }
 
   private fun useTempKey() = Keychain.setKeyPath(tmp.resolve("auth").toString())
 
-  @Test
-  fun signHubSignsHubBoundString() {
+  private fun started(
+    hub: FakeHub,
+    sign: ((String, String) -> String)? = null,
+    device: Boolean = false,
+    name: String? = null,
+  ): Service {
     useTempKey()
-    val parts = Keychain.signHub(HUB_KEY).split(".")
-    assertEquals(4, parts.size)
-    assertTrue(verifies(parts[1], "hub1:$HUB_KEY:${parts[3]}", parts[2]))
-    assertFalse(verifies(parts[1], parts[3], parts[2]), "a v1 token must not verify as v0")
+    this.hub = hub
+    return Service(
+      address = hub.address, sign = sign, device = device, name = name,
+      deviceName = "Mac Studio", deviceKeyPath = tmp.resolve("device.key").toString(),
+    ).also {
+      service = it
+      it.start()
+    }
   }
 
   @Test
-  fun connectsWithV0UntilAHubKeyIsKnown() {
+  fun signHubSignsItsChallenge() {
     useTempKey()
-    val service = Service(address = 4100, device = false)
-    assertNull(service.hubKey)
-    assertEquals("0", service.authHeaderMap()["v"])
+    val parts = Keychain.signHub(HUB_KEY, "nonce-1").split(".")
+    assertEquals(5, parts.size)
+    assertEquals("nonce-1", parts[4])
+    assertTrue(verifies(parts[1], "hub1:$HUB_KEY:nonce-1:${parts[3]}", parts[2]))
   }
 
   @Test
-  fun hubKeyOptionSignsV1() {
-    useTempKey()
-    val headers = Service(address = 4100, hubKey = HUB_KEY, device = false).authHeaderMap()
+  fun sendsATokenOnlyAfterProofAndPinsTheKey() {
+    val hub = FakeHub()
+    val s = started(hub, device = true, name = "Echo")
+    await { hub.updates.isNotEmpty() }
+
+    // hub/info went on an anonymous connection before the service's own.
+    assertEquals(2, hub.connects.size)
+    assertFalse("auth" in hub.connects[0])
+    assertFalse("device" in hub.connects[0])
+    assertFalse("v" in hub.connects[0])
+    val headers = hub.connects[1]
     assertEquals("1", headers["v"])
-    val parts = headers.getValue("auth").split(".")
-    assertTrue(verifies(parts[1], "hub1:$HUB_KEY:${parts[3]}", parts[2]))
+    assertTrue("device" in headers)
+    val auth = headers.getValue("auth").split(".")
+    assertEquals("challenge-1", auth[4])
+    assertTrue(verifies(auth[1], "hub1:$HUB_KEY:challenge-1:${auth[3]}", auth[2]))
+
+    assertEquals(HUB_KEY, s.hubKey)
+    assertEquals("{\"${hub.address}\":\"$HUB_KEY\"}", Files.readString(tmp.resolve("hubs.json")))
+    assertTrue(Regex("[A-Za-z0-9_-]{43}").matches(hub.nonces[0]), hub.nonces[0])
+  }
+
+  @Test
+  fun callsMadeRightAfterStartWaitForTheConnection() {
+    val hub = FakeHub(setup = { it.post<Any?, Any?, Unit>("ping") { "pong" } })
+    val s = started(hub)
+    assertEquals("pong", s.send("ping"))
+  }
+
+  @Test
+  fun everyConnectGetsItsOwnNonceAndChallenge() {
+    val hub = FakeHub()
+    val first = started(hub)
+    await { hub.updates.size == 1 }
+    first.stop()
+    val second = started(hub)
+    await { hub.updates.size == 2 }
+    second.stop()
+    assertEquals(2, hub.nonces.size)
+    assertNotEquals(hub.nonces[0], hub.nonces[1])
+    val one = hub.updates[0].getValue("auth").split(".")
+    val two = hub.updates[1].getValue("auth").split(".")
+    assertEquals(5, one.size)
+    assertNotEquals(one[4], two[4])
+    assertEquals(HUB_KEY, HubPins(tmp.resolve("hubs.json")).get(hub.address))
+  }
+
+  @Test
+  fun reconnectsAskAgain() {
+    val hub = FakeHub()
+    started(hub)
+    await { hub.updates.size == 1 }
+    hub.latest.get().stop()
+    await { hub.updates.size == 2 }
+    assertEquals(2, hub.nonces.size)
+    assertNotEquals(hub.updates[0]["auth"], hub.updates[1]["auth"])
+  }
+
+  private fun getsNothing(answer: (String, String) -> Any?) {
+    val hub = FakeHub(answer)
+    val s = started(hub)
+    await { hub.nonces.isNotEmpty() }
+    Thread.sleep(1500)
+    assertEquals(emptyList(), hub.credentialsSent())
+    assertEquals(emptyList(), hub.updates.toList())
+    assertNull(s.hubKey)
+    assertFalse(Files.exists(tmp.resolve("hubs.json")))
+    assertTrue(s.lastError!!.contains("didn't prove"), s.lastError)
+  }
+
+  @Test
+  fun aHubWithoutProofGetsNothing() =
+    getsNothing { _, challenge -> mapOf("key" to HUB_KEY, "protocol" to 2, "challenge" to challenge) }
+
+  @Test
+  fun aHubClaimingTheRealKeyButSigningWithItsOwnGetsNothing() {
+    val own = FakeHub.key("service")
+    getsNothing { nonce, challenge -> FakeHub.proof(own, HUB_KEY, nonce, challenge) }
+  }
+
+  @Test
+  fun aHubProvingAnotherKeyThanThePinGetsNothing() {
+    val hub = FakeHub(FakeHub.proving("service"))
+    useTempKey()
+    HubPins(tmp.resolve("hubs.json")).put(hub.address, HUB_KEY)
+    val s = started(hub)
+    await { hub.nonces.isNotEmpty() }
+    Thread.sleep(1500)
+    assertEquals(emptyList(), hub.credentialsSent())
+    assertEquals(HUB_KEY, s.hubKey)
+    assertEquals(HUB_KEY, HubPins(tmp.resolve("hubs.json")).get(hub.address))
+    assertTrue(s.lastError!!.contains("not the pinned"), s.lastError)
+  }
+
+  @Test
+  fun stopEndsAWaitingHandshakeAndItsCalls() {
+    val hub = FakeHub({ _, _ -> mapOf("key" to HUB_KEY) })
+    val s = started(hub)
+    val call = CompletableFuture.supplyAsync {
+      try {
+        s.send("ping")
+      } catch (error: IllegalStateException) {
+        error.message
+      }
+    }
+    await { hub.nonces.isNotEmpty() }
+    val stoppedAt = System.currentTimeMillis()
+    s.stop()
+    assertEquals("Service not started", call.get(1, TimeUnit.SECONDS))
+    assertTrue(System.currentTimeMillis() - stoppedAt < 1000)
+  }
+
+  @Test
+  fun aPublicPlainAddressIsNotDialed() {
+    useTempKey()
+    val s = Service(address = "ws://hub.example.com:1997", device = false).also { service = it }
+    s.start()
+    assertTrue(assertFailsWith<IllegalStateException> { s.send("x") }.message!!.contains("unencrypted"))
+    assertTrue(assertFailsWith<IllegalStateException> { s.values("x") }.message!!.contains("unencrypted"))
+  }
+
+  @Test
+  fun allowPlaintextDialsARefusedAddress() {
+    useTempKey()
+    // The option lets a refused address through, to a name that goes nowhere.
+    val s = Service(address = "ws://hub.invalid:1", device = false, allowPlaintext = true).also { service = it }
+    s.start()
+    await { s.lastError != null }
+    assertFalse(s.lastError!!.contains("unencrypted"), s.lastError)
   }
 
   @Test
@@ -68,13 +217,20 @@ class HubAuthTest {
 
     val service = Service(address = 4100, device = false)
     assertEquals(HUB_KEY, service.hubKey)
-    assertEquals("1", service.authHeaderMap()["v"])
     assertNull(Service(address = "ws://other:1997", device = false).hubKey)
 
     service.forgetHubKey()
     assertNull(service.hubKey)
-    assertEquals("0", service.authHeaderMap()["v"])
     assertEquals("{}", Files.readString(tmp.resolve("hubs.json")))
+  }
+
+  @Test
+  fun hubKeyOptionIsThePin() {
+    useTempKey()
+    val service = Service(address = 4100, hubKey = HUB_KEY, device = false)
+    assertEquals(HUB_KEY, service.hubKey)
+    service.forgetHubKey()
+    assertNull(service.hubKey)
   }
 
   @Test
@@ -86,10 +242,28 @@ class HubAuthTest {
   }
 
   @Test
-  fun customSignStaysV0() {
-    val headers = Service(hubKey = HUB_KEY, sign = { "key.custom" }).authHeaderMap()
-    assertEquals("key.custom", headers["auth"])
-    assertEquals("0", headers["v"])
+  fun customSignGetsTheProvenKeyAndTheChallenge() {
+    val hub = FakeHub()
+    started(hub, sign = { key, challenge -> "key.custom.$key.$challenge" }, device = true)
+    await { hub.updates.isNotEmpty() }
+    val headers = hub.updates[0]
+    assertEquals("key.custom.$HUB_KEY.challenge-1", headers["auth"])
+    assertEquals("1", headers["v"])
+    assertNull(headers["device"])
+  }
+
+  @Test
+  fun customSignDoesNotRunWithoutProof() {
+    val signed = AtomicInteger()
+    val hub = FakeHub({ _, challenge -> mapOf("key" to HUB_KEY, "challenge" to challenge) })
+    started(hub, sign = { _, _ ->
+      signed.incrementAndGet()
+      "key.custom"
+    })
+    await { hub.nonces.isNotEmpty() }
+    Thread.sleep(300)
+    assertEquals(0, signed.get())
+    assertEquals(emptyList(), hub.credentialsSent())
   }
 
   @Test

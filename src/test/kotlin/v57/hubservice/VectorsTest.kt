@@ -3,6 +3,7 @@ package v57.hubservice
 import channel.defaultJsonCodec
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -35,19 +36,45 @@ class VectorsTest {
   }
 
   @Test
-  fun authTokensV0AndV1() {
+  fun authTokenMatches() {
     val expiry = (at("auth")["expiry"] as Number).toLong()
+    val nonce = at("auth")["nonce"] as String
     val service = key("service")
     val hubKey = publicKey("hub")
 
-    val v0 = at("auth", "v0")
-    assertEquals(v0["signature"], service.sign(v0["signedData"] as String))
-    assertEquals(v0["header"], Keychain.token(service, null, expiry))
-
     val v1 = at("auth", "v1")
-    assertEquals("hub1:$hubKey:$expiry", v1["signedData"])
+    assertEquals("hub1:$hubKey:$nonce:$expiry", v1["signedData"])
     assertEquals(v1["signature"], service.sign(v1["signedData"] as String))
-    assertEquals(v1["header"], Keychain.token(service, hubKey, expiry))
+    assertEquals(v1["header"], Keychain.token(service, hubKey, nonce, expiry))
+  }
+
+  @Test
+  fun hubInfoProof() {
+    val vector = at("hubInfo")
+    val hubKey = publicKey("hub")
+    val nonce = vector["nonce"] as String
+    val proof = vector["proof"] as String
+    assertEquals(vector["signedData"], HubProof.signedData(hubKey, nonce))
+    assertTrue(HubInfo(hubKey, proof, "c").proves(nonce))
+    assertFalse(HubInfo(hubKey, proof, "c").proves("another-nonce-another-nonce"))
+    assertFalse(HubInfo(publicKey("service"), proof, "c").proves(nonce))
+    assertFalse(HubInfo(hubKey, null, "c").proves(nonce))
+    assertFalse(HubInfo(hubKey, proof, null).proves(nonce))
+    assertFalse(HubInfo(hubKey, "not base64!", "c").proves(nonce))
+    assertFalse(HubInfo("not a key", proof, "c").proves(nonce))
+  }
+
+  @Test
+  fun transports() {
+    @Suppress("UNCHECKED_CAST")
+    val cases = vectors["transport"] as List<Map<String, Any?>>
+    assertTrue(cases.isNotEmpty())
+    for (case in cases) {
+      assertEquals(case["transport"], HubTransport.of(case["url"] as String).label, case["url"] as String)
+    }
+    assertEquals(HubTransport.LOOPBACK, HubTransport.of(1997))
+    assertEquals(HubTransport.LOOPBACK, HubTransport.of("1997"))
+    assertEquals(HubTransport.REFUSED, HubTransport.of("hub:1997"))
   }
 
   @Test

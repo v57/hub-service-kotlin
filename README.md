@@ -7,10 +7,9 @@ Kotlin port of [hub-service](https://github.com/v57/hub-service) — connect to 
 [hub](https://github.com/v57/hub-lite) (default `127.0.0.1:1997`), host your own
 post/stream API endpoints, register apps, and call API through the hub.
 
-hub-server auth is supported: every (re)connect sends `auth` + `v` headers signed
-by the ed25519 keychain (`auth` key file in the cwd, or `$HUBKEY`), bound to
-the hub's key once it is pinned (`v: 1`). hub-lite ignores the headers. The
-wire contract matches the TS reference (`hub/profile/update`,
+hub-server auth is supported: every (re)connect asks the hub to prove its key,
+then sends a fresh `auth` token signed by the ed25519 keychain (`auth` key file in
+the cwd, or `$HUBKEY`). The wire contract matches the TS reference (`hub/profile/update`,
 `hub/service/update`, AppInterface + element DSL). Built on
 [channel-kotlin](https://github.com/v57/channel-kotlin) via a Gradle composite
 build.
@@ -87,14 +86,26 @@ val response = service.send("echo/upper", "hello") // "HELLO"
 
 ## API
 
-- `Service(address?, name?, icon?, sign?, hubKey?)` — `address` is a port
-  (Int) or a `ws://` URL (String); default `1997` or `$HUB`. `name`/`icon` set
-  the profile (`hub/profile/update` is only sent when set)
-- Hub-bound auth: the first connect uses `v: 0`, asks `hub/info` for the hub
-  key, pins it in `hubs.json` beside the key file and reconnects with `v: 1`
-  (`hubKey` supplies it up front, `forgetHubKey()` clears the pin,
-  `lastError` reports a refused connect). `Keychain.sign()` / `signHub(key)`
-  make the tokens
+- `Service(address?, name?, icon?, sign?, hubKey?, …, allowPlaintext?)` — `address`
+  is a port (Int) or a `ws://` URL (String); default `1997` or `$HUB`. `name`/`icon`
+  set the profile (`hub/profile/update` is only sent when set). `sign` is a custom
+  token factory given the proven hub key and the challenge (turns off device mode).
+  `allowPlaintext` dials plain `ws://` beyond loopback, the overlay and the LAN
+  (also `HUB_ALLOW_PLAINTEXT=1`)
+- Hub-bound tokens (`Docs/Devices/protocol.md` section 2): a token signs
+  `hub1:<hub key>:<nonce>:<expiry>`, so it works once, on the hub it was made for.
+  Before every connect the service asks `hub/info` with a fresh nonce on a short
+  anonymous connection. Only an answer with a valid proof of the key it claims gets
+  a token, over that answer's challenge. The first proven key is pinned in
+  `hubs.json` beside the key file. A hub that doesn't prove its key, or answers with
+  another than the pinned one, gets nothing and is reported while the service keeps
+  trying, so calls made right after `start()` wait instead of being lost. Plain
+  `ws://` beyond loopback, the overlay and the LAN isn't dialed unless
+  `allowPlaintext` says so (`HubTransport.of(address)` classifies an address).
+  `hubKey` supplies the key up front, `forgetHubKey()` clears the pin, `lastError`
+  reports the last failure. `Keychain.signHub(key, nonce)` makes a token. The
+  channel-kotlin client only dials `ws://`, so a `wss://` address is reported and
+  retried, never downgraded
 - Device mode (on by default): every connect also sends a `device` header, a
   7-day certificate for the service key signed by the device key
   (`~/.hub/device.key`, `$HUB_DEVICE_KEY` or `deviceKeyPath`, created 0600;

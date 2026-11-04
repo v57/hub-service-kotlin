@@ -111,22 +111,23 @@ class ServiceTest {
 
   @Test
   fun authHeadersCarrySignedTokenAndVersion() {
-    val s = Service(sign = { "key.fake.sig.123" })
-    val headers = s.authHeaders()
-    assertTrue(headers.startsWith("auth: key.fake.sig.123\r\n"), headers)
-    assertTrue(headers.endsWith("v: 0"), headers)
+    val s = Service(sign = { key, challenge -> "key.fake.$key.$challenge" })
+    val headers = s.rawHeaders(s.signedHeaders("hub", "challenge"))
+    assertTrue(headers.startsWith("auth: key.fake.hub.challenge\r\n"), headers)
+    assertTrue(headers.endsWith("v: 1"), headers)
   }
 
   @Test
   fun authHeadersDefaultSignViaKeychain() {
-    // Real keychain token: key.<pub>.<sig>.<decimal-expiry>, fresh per call.
+    // Real keychain token: key.<pub>.<sig>.<decimal-expiry>.<challenge>, fresh per call.
     val s = Service(device = false)
-    val headers = s.authHeaders()
+    val headers = s.rawHeaders(s.signedHeaders("hub", "challenge"))
     val token = headers.removePrefix("auth: ").substringBefore("\r\n")
     val parts = token.split(".")
-    assertEquals(4, parts.size, "key.<pub>.<sig>.<expiry>")
+    assertEquals(5, parts.size, "key.<pub>.<sig>.<expiry>.<challenge>")
     assertEquals("key", parts[0])
     assertTrue(parts[3].all { it.isDigit() }, "expiry is decimal: ${parts[3]}")
-    assertTrue(headers.endsWith("v: 0"), headers)
+    assertEquals("challenge", parts[4])
+    assertTrue(headers.endsWith("v: 1"), headers)
   }
 }

@@ -7,9 +7,9 @@ import java.nio.file.Path
 /**
  * Pinned hub keys (Docs/Devices/protocol.md section 2): the file `hubs.json`
  * beside the service key file, a JSON object `{"<address>": "<hub SPKI>"}`
- * keyed by the normalized address ([Service.normalizeAddress]). A service
- * learns a hub's key from `hub/info` on its first (v0) connection and signs
- * v1 tokens bound to it from then on.
+ * keyed by the normalized address ([Service.normalizeAddress]). A service pins
+ * the first key a hub proved in `hub/info`; a hub that later claims another key
+ * gets nothing.
  */
 class HubPins(val path: Path) {
   /** The pinned key for [address], or null. */
@@ -32,7 +32,7 @@ class HubPins(val path: Path) {
   }
 
   private fun read(): LinkedHashMap<String, Any?> {
-    // A corrupt pin file counts as empty: the next hub/info pins again.
+    // A corrupt pin file counts as empty: the next proven key pins again.
     val value = runCatching {
       if (Files.exists(path)) defaultJsonCodec().decode(Files.readString(path)) else null
     }.getOrNull()
