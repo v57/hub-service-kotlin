@@ -16,20 +16,27 @@ build.
 
 ## Install
 
-`hub-service-kotlin` is a Gradle (Kotlin JVM) library. It expects
-`channel-kotlin` as a sibling checkout and wires it in with
-`includeBuild("../../Channel/channel-kotlin")`:
+Not published to Maven Central. `hub-service-kotlin` is a Gradle (Kotlin JVM) library that includes
+[channel-kotlin](https://github.com/v57/channel-kotlin) from `../../Channel/channel-kotlin` (`includeBuild` in
+`settings.gradle.kts`), so clone both into the Hub layout. JDK 21 required.
+
+```bash
+mkdir -p Hub/Channel Hub/HubService
+git clone https://github.com/v57/channel-kotlin Hub/Channel/channel-kotlin
+git clone https://github.com/v57/hub-service-kotlin Hub/HubService/hub-service-kotlin
+cd Hub/HubService/hub-service-kotlin
+./gradlew build
+```
+
+To use it from your own Gradle build, include it as a composite build (it brings channel-kotlin along):
 
 ```kotlin
 // settings.gradle.kts
-rootProject.name = "my-service"
-includeBuild("../../Channel/channel-kotlin")
-```
+includeBuild("path/to/Hub/HubService/hub-service-kotlin")
 
-```kotlin
 // build.gradle.kts
 dependencies {
-  implementation(":channel-kotlin:unspecified")
+  implementation("v57.hubservice:hub-service-kotlin")
 }
 ```
 

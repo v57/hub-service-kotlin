@@ -5,6 +5,9 @@ plugins {
   kotlin("jvm") version "2.2.21"
 }
 
+// Coordinates for builds that include this one (includeBuild): v57.hubservice:hub-service-kotlin
+group = "v57.hubservice"
+
 repositories {
   mavenCentral()
 }
